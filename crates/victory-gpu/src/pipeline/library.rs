@@ -62,11 +62,7 @@ fn library() -> Option<&'static Mutex<Library>> {
                 .get()
                 .and_then(|d| std::fs::read(d.join(LIBRARY_FILE)).ok())
                 .unwrap_or_default();
-            let library = open(&device, blob);
-            if library.is_none() {
-                tracing::warn!("no host pipeline library: pipelines are not kept");
-            }
-            library.map(Mutex::new)
+            open(&device, blob).map(Mutex::new)
         })
         .as_ref()
 }
@@ -91,8 +87,16 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
     } else {
         tracing::info!("no host pipeline library yet; starting an empty one");
     }
-    let library = make(&[]).ok()?;
-    Some(Library { library, _blob: Vec::new(), added: 0 })
+    // Some hosts (vkd3d-proton) refuse an empty blob outright; without a
+    // library only the early list is kept, so why it is refused is worth
+    // a line.
+    match make(&[]) {
+        Ok(library) => Some(Library { library, _blob: Vec::new(), added: 0 }),
+        Err(e) => {
+            tracing::info!(error = %e, "the host refuses an empty pipeline library: only the early list is kept");
+            None
+        }
+    }
 }
 
 /// A pipeline's name in the library: the hash of what its host
@@ -398,12 +402,37 @@ pub(crate) fn save(now: bool) {
     // replace files under each other.
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     const SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
-    let (Some(dir), Some(library)) = (DIR.get(), library()) else { return };
+    let Some(dir) = DIR.get() else { return };
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     if !now && last.is_some_and(|t| t.elapsed() < SAVE_EVERY) {
         return;
     }
     *last = Some(std::time::Instant::now());
+    let Some(library) = library() else {
+        // Without a library the early list is all we keep: the host's own
+        // disk cache covers the compiles once the same pipelines are made
+        // again, and the list is what starts them during loading.
+        if !USED_CHANGED.load(Ordering::Relaxed) {
+            return;
+        }
+        let used_changed = USED_CHANGED.swap(false, Ordering::Relaxed);
+        let used: Vec<String> =
+            USED.lock().unwrap_or_else(|e| e.into_inner()).iter().flatten().cloned().collect();
+        let written =
+            std::fs::create_dir_all(dir).and_then(|()| write_atomically(&dir.join(EARLY_FILE), used.join("\n").as_bytes()));
+        match written {
+            Ok(()) => tracing::info!(early = used.len(), made = MADE.load(Ordering::Relaxed), "host pipeline early list saved"),
+            Err(e) => {
+                // The list was not published. Keep the flag dirty for the
+                // next save.
+                if used_changed {
+                    USED_CHANGED.store(true, Ordering::Relaxed);
+                }
+                tracing::warn!(error = %e, "host pipeline early list not saved");
+            }
+        }
+        return;
+    };
     let (blob, saved_additions) = {
         let l = library.lock().unwrap_or_else(|e| e.into_inner());
         if l.added == 0 && !USED_CHANGED.load(Ordering::Relaxed) {
