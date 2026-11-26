@@ -513,6 +513,13 @@ pub(crate) fn near_heaps(va: u64) -> String {
 /// tiers 1 and 2; tier 3 hardware may take more.
 const PORTABLE_VIEWS: u32 = 1_000_000;
 
+/// The title's slots a capped view heap keeps: a world frame's draws need
+/// their tables made afresh (constant buffers copied per draw) and each
+/// table takes slots of its own, so the heap gives them the first
+/// [`TITLE_CAPPED`] slots and leaves the rest to the dynamic remap in
+/// draw::tables (upstream issue #3081).
+const TITLE_CAPPED: u32 = 393_215;
+
 /// Slots past the title's in a view heap, for tables a draw needs made
 /// afresh (constant buffers copied per draw). A list holds the slots it
 /// took until it is reset (its submissions have run) or released. A world
@@ -521,9 +528,6 @@ const PORTABLE_VIEWS: u32 = 1_000_000;
 /// subsurface resolve, tree imposters). `victory_shader::emit::VIEW_SLOTS`
 /// is the title's 1,245,184 slots, these and those of [`crate::memory`].
 const DYNAMIC: u32 = 1 << 20;
-/// Smaller dynamic reserve when the host caps the whole view heap at
-/// [`PORTABLE_VIEWS`].
-const DYNAMIC_CAPPED: u32 = 1 << 16;
 
 /// The host's limit for shader-visible sampler heaps, on every binding
 /// tier.
@@ -691,18 +695,25 @@ impl HostHeap {
             Ok(heap) => (heap, count, extra),
             Err(e) if !sampler && count + extra + crate::memory::SLOTS > PORTABLE_VIEWS => {
                 // shortcut: descriptors past the host's limit are left out;
-                // draw::tables now remaps the root tables that reach them.
+                // keep the title's first [`TITLE_CAPPED`] slots so the
+                // tables a draw needs made afresh have slots of their own,
+                // and leave the rest to the dynamic remap in draw::tables.
+                let made = TITLE_CAPPED;
+                let dynamic = PORTABLE_VIEWS - crate::memory::SLOTS - made;
                 tracing::warn!(
                     error = %e,
                     wanted,
-                    made = PORTABLE_VIEWS - DYNAMIC_CAPPED,
-                    lost = wanted + DYNAMIC_CAPPED - PORTABLE_VIEWS,
+                    made,
+                    lost = wanted - made,
+                    dynamic,
                     "host view heap capped at {PORTABLE_VIEWS}"
                 );
                 (
-                    make(PORTABLE_VIEWS - crate::memory::SLOTS).ok()?,
-                    PORTABLE_VIEWS - DYNAMIC_CAPPED - crate::memory::SLOTS,
-                    DYNAMIC_CAPPED,
+                    make(made + crate::memory::SLOTS)
+                        .or_else(|_| make(PORTABLE_VIEWS - crate::memory::SLOTS))
+                        .ok()?,
+                    made,
+                    dynamic,
                 )
             }
             Err(e) => {
