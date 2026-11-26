@@ -2399,6 +2399,29 @@ pub(crate) mod tests {
         );
     }
 
+    /// A compute pass whose table load reads a kernel-argument SGPR beyond
+    /// the layout's root parameters (Marvisak/VIctory#293: the world
+    /// phase's "an address in an SGPR that is no root parameter"). Plain
+    /// `track` refuses; with `addresses` the scalar load is skipped and the
+    /// program translates, the memory reached by its address.
+    #[test]
+    fn an_sgpr_base_beyond_the_layout_falls_back_to_its_address() {
+        let code: Vec<u8> = [0xF408_0001, 0xFA00_0000, S_ENDPGM] // s_load_dwordx4 s[0:3], s[2:3]
+            .iter()
+            .flat_map(|w: &u32| w.to_le_bytes())
+            .collect();
+        let p = crate::ir::build(&code, false, 256).unwrap();
+        let layout = [param(Descriptor, 9, 1)];
+        assert_eq!(
+            track_with(&p, &layout, HwStage::Cs, false).unwrap_err(),
+            ShaderError::Unsupported {
+                offset: 0,
+                what: "an address in an SGPR that is no root parameter"
+            }
+        );
+        assert!(track_with(&p, &layout, HwStage::Cs, true).is_ok());
+    }
+
     /// A waterfall loop over an image descriptor each lane loads from the
     /// table at s0 (wave32, assembled with llvm-mc for gfx1030): lane i
     /// reads entry i with two `global_load_dwordx4`, the loop reads the

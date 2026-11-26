@@ -195,6 +195,18 @@ pub fn rays() -> bool {
     *RAYS.get_or_init(|| cfg!(test) || std::env::var("VICTORY_RAYS").is_ok_and(|v| v == "1"))
 }
 
+/// Whether compute programs that refuse over an address the layout does not
+/// cover retry with buffer descriptors the code makes around such addresses
+/// (module notes, "Addresses"): `VICTORY_SHADER_ADDRESSES=1`. The world
+/// phase's compute passes keep their kernel-argument bases in input SGPRs
+/// beyond the root params (Marvisak/VIctory#293); `Source::Address` needs no
+/// mapping for them, only the host's reading of raw descriptor dwords.
+pub fn addresses_fallback() -> bool {
+    static ADDRESSES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ADDRESSES
+        .get_or_init(|| std::env::var("VICTORY_SHADER_ADDRESSES").is_ok_and(|v| v == "1"))
+}
+
 /// Slots the host's view heaps have at least (`victory-gpu` pads them); the
 /// last is always null. The title's heap is 1,245,184 slots, with
 /// `victory-gpu`'s own slots after it.
@@ -341,7 +353,7 @@ pub fn translate_for(container: &[u8], target: Target) -> Result<HostShader, Sha
         let res = resource::track_with(&p, &native.layout, native.stage, addresses)?;
         emit(&c, &native, &p, &st, &io, &res, target)
     };
-    let compute = native.stage == HwStage::Cs && rays();
+    let compute = native.stage == HwStage::Cs && (rays() || addresses_fallback());
     let plain = match with(traces && compute) {
         Err(ShaderError::Unsupported { .. }) if compute && !traces => with(true),
         Err(ShaderError::Unsupported { .. }) if compute => with(false),
