@@ -127,6 +127,15 @@ trait Source: Send {
     /// Motor speeds for the pad in host slot `slot`; a host without
     /// trigger motors drops those two.
     fn rumble(&mut self, slot: usize, motors: Motors);
+
+    /// Diagnostics: scripted keys (`VICTORY_KEYS`, `VICTORY_KEYS_FILE`)
+    /// are in flight, so the stand-in pad must exist even where a real
+    /// pad is connected: a title that reads pads only would otherwise
+    /// never see the scripted presses.
+    #[cfg(feature = "diagnostics")]
+    fn scripted(&mut self) -> bool {
+        false
+    }
 }
 
 fn fallback(keys: &[KeyState]) -> PadState {
@@ -415,12 +424,16 @@ impl Hub {
 
     /// Reads the host once; device callbacks run on the calling thread.
     fn poll(&self) {
-        let (pads, keys) = {
+        let (pads, keys, scripted) = {
             let mut source = lock(&self.source);
+            #[cfg(feature = "diagnostics")]
+            let scripted = source.scripted();
+            #[cfg(not(feature = "diagnostics"))]
+            let scripted = false;
             let pads: [_; PADS] = std::array::from_fn(|slot| source.pad(slot));
-            (pads, source.keys())
+            (pads, source.keys(), scripted)
         };
-        let events = self.state().poll(&self.devices, pads, keys);
+        let events = self.state().poll(&self.devices, pads, keys, scripted);
         self.deliver(events);
     }
 
@@ -465,6 +478,7 @@ impl State {
         devices: &[Device; DEVICES],
         pads: [Option<PadState>; PADS],
         keys: Vec<KeyState>,
+        scripted: bool,
     ) -> Vec<Event> {
         let now = now();
         let mut events = std::mem::take(&mut self.pending);
@@ -472,7 +486,12 @@ impl State {
         for (slot, pad) in pads.into_iter().enumerate() {
             self.update(devices, slot, pad.map(Value::Pad), now, &mut events);
         }
-        let fallback = (!any_pad).then(|| Value::Pad(fallback(&keys)));
+        // Diagnostics: the stand-in pad exists whenever scripted keys are
+        // in flight, not only when no pad is connected, so the scripted
+        // presses reach a title that reads pads while a real pad sits in a
+        // slot.
+        let fallback =
+            (!any_pad || scripted).then(|| Value::Pad(fallback(&keys)));
         self.update(devices, FALLBACK, fallback, now, &mut events);
         self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
         events
@@ -1178,6 +1197,11 @@ mod host {
                 });
             }
             None
+        }
+
+        #[cfg(feature = "diagnostics")]
+        fn scripted(&mut self) -> bool {
+            !scripted().is_empty()
         }
 
         fn keys(&mut self) -> Vec<KeyState> {
